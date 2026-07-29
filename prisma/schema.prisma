@@ -1,0 +1,153 @@
+// LEBMONEY API — data model
+// Dev uses SQLite for zero-config local running. Production swaps `provider`
+// to "postgresql" (per the Phase 0 architecture decision).
+//
+// IMPORTANT: SQLite has no native enum support in Prisma (Postgres/MySQL do).
+// Every field that would naturally be an enum is a validated String instead,
+// with the allowed values defined once in src/common/enums.ts and enforced
+// there via class-validator — not by the database. If you migrate to
+// Postgres later, converting these back to real Prisma `enum` types is a
+// clean follow-up (and a nice integrity upgrade), not a rewrite.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  handle    String   @unique
+  name      String?
+  email     String?
+  kycTier   String   @default("TIER_0") // TIER_0 | TIER_1 | TIER_2 — see src/common/enums.ts
+  status    String   @default("ACTIVE") // ACTIVE | FROZEN | CLOSED
+  createdAt DateTime @default(now())
+
+  wallet         Wallet?
+  kycCases       KycCase[]
+  supportTickets SupportTicket[]
+}
+
+/// One wallet per user. Holds one CurrencyAccount per currency the user has added.
+model Wallet {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  currencyAccounts CurrencyAccount[]
+}
+
+model CurrencyAccount {
+  id        String  @id @default(cuid())
+  walletId  String
+  wallet    Wallet  @relation(fields: [walletId], references: [id])
+  currency  String // USD | LBP | EUR
+  isPrimary Boolean @default(false)
+
+  ledgerEntries LedgerEntry[]
+
+  @@unique([walletId, currency])
+}
+
+/// Immutable double-entry rows. Every Transaction must produce ledger entries
+/// that sum to zero across all its CurrencyAccounts (see LedgerService) —
+/// this is what makes the ledger auditable rather than trusting a single
+/// mutable "balance" field (Phase 0 architecture decision, §4.3).
+model LedgerEntry {
+  id                String          @id @default(cuid())
+  currencyAccountId String
+  currencyAccount   CurrencyAccount @relation(fields: [currencyAccountId], references: [id])
+  transactionId     String
+  transaction       Transaction     @relation(fields: [transactionId], references: [id])
+  amount            Float // positive = credit, negative = debit
+  balanceAfter      Float // snapshot, for fast history rendering
+  createdAt         DateTime        @default(now())
+}
+
+model Transaction {
+  id                 String   @id @default(cuid())
+  type               String // SEND | BILL_PAY | RECHARGE | QR_PAYMENT | CURRENCY_EXCHANGE | TOP_UP
+  status             String   @default("PENDING") // PENDING | PROCESSING | COMPLETED | FAILED | REVERSED | FLAGGED_FOR_REVIEW
+  counterpartyLabel  String
+  originalCurrency   String
+  originalAmount     Float
+  reportingCurrency  String
+  convertedAmount    Float
+  exchangeRateAtTime Float    @default(1)
+  flagged            Boolean  @default(false)
+  flagReason         String?
+  createdAt          DateTime @default(now())
+
+  ledgerEntries LedgerEntry[]
+}
+
+model KycCase {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  tierRequested String // TIER_1 | TIER_2
+  status        String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  submittedAt   DateTime  @default(now())
+  reviewedAt    DateTime?
+}
+
+model Biller {
+  id       String  @id @default(cuid())
+  name     String
+  category String
+  active   Boolean @default(true)
+}
+
+model Perk {
+  id              String  @id @default(cuid())
+  title           String
+  description     String
+  cashbackPercent Int?
+  active          Boolean @default(true)
+}
+
+model SupportTicket {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  subject   String
+  status    String   @default("OPEN") // OPEN | IN_PROGRESS | RESOLVED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages TicketMessage[]
+}
+
+model TicketMessage {
+  id        String        @id @default(cuid())
+  ticketId  String
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id])
+  sender    String // USER | AGENT
+  text      String
+  createdAt DateTime      @default(now())
+}
+
+/// Internal staff accounts — separate from the customer User model.
+/// Real auth for these is an internal SSO/IdP; this table just tracks role
+/// assignment (Screen Inventory §19 — Roles & Permissions).
+model AdminAccount {
+  id    String @id @default(cuid())
+  email String @unique
+  role  String @default("SUPPORT_AGENT") // SUPPORT_AGENT | COMPLIANCE_OFFICER | SUPER_ADMIN
+}
+
+/// Append-only. Every mutating admin action writes one row here via
+/// AuditLogService — this is what makes admin actions actually auditable
+/// rather than just a UI that claims to log them.
+model AuditLogEntry {
+  id        String   @id @default(cuid())
+  actor     String
+  action    String
+  target    String
+  createdAt DateTime @default(now())
+}
