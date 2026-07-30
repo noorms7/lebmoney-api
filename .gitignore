@@ -15,3 +15,5 @@ build/
 
 # Logs
 npm-debug.log*
+
+tsconfig.tsbuildinfo
